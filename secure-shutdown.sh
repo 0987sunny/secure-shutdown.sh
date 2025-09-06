@@ -17,14 +17,18 @@ warn()  { print -P "%F{yellow}[!]%f $*"; }
 err()   { print -P "%F{red}[✗]%f $*" >&2; }
 info()  { print -P "%F{cyan}[*]%f $*"; }
 
+# zsh-native spinner
 spinner() {  # spinner "message" & pid
-  local msg="$1" pid="$2" s='|/-\' i=0
+  local msg="$1" pid="$2"
+  local -a frames=('|' '/' '-' '\')
+  local i=1 n=${#frames}
   print -n -- " $msg "
   while kill -0 "$pid" 2>/dev/null; do
-    printf "\r %s %s" "${msg}" "${s:i++%${#s}:1}"
+    print -nr -- "\r $msg ${frames[i]}"
+    (( i = (i % n) + 1 ))
     sleep 0.1
   done
-  printf "\r"
+  print -r -- "\r $msg "
 }
 
 line() { print -P "%F{magenta}-----------------------------------------------------%f"; }
@@ -36,9 +40,24 @@ banner() {
   print -P "%F{magenta}=====================================================%f"
 }
 
-### ---------- safety nets ----------
-trap 'err "Unexpected error; aborting."; exit 1' ERR
-trap 'warn "Interrupted by user."; exit 130' INT
+### ---------- safety nets (restore net on abort) ----------
+_restore_net() {
+  [[ -f /run/secure-shutdown.netoff ]] || return 0
+  if command -v nmcli &>/dev/null; then
+    nmcli radio all on || true
+    nmcli networking on || true
+    systemctl restart NetworkManager || true
+  else
+    local ifc
+    for ifc in ${(f)"$(ip -o link show 2>/dev/null | awk -F': ' '$2!="lo"{print $2}')"}; do
+      ip link set "$ifc" up 2>/dev/null || true
+    done
+  fi
+  rm -f /run/secure-shutdown.netoff 2>/dev/null || true
+}
+
+trap 'err "Unexpected error; restoring networking and aborting."; _restore_net; exit 1' ERR
+trap 'warn "Interrupted by user; restoring networking."; _restore_net; exit 130' INT
 stty -echoctl 2>/dev/null || true  # hide ^C caret
 
 # Require root; re-exec with same env. Will prompt for sudo if needed.
@@ -50,7 +69,6 @@ fi
 clear
 banner
 
-# Targeted info that matters for your stack
 info "Kernel: $(uname -r)   Uptime: $(uptime -p)"
 info "TTY: $(tty 2>/dev/null || echo n/a)   User: ${SUDO_USER:-$USER}"
 info "Root source: $(findmnt -no SOURCE /)"
@@ -67,7 +85,7 @@ fi
 info "Block devices:"
 lsblk -o NAME,RM,SIZE,RO,TYPE,MOUNTPOINTS | sed 's/^/    /'
 
-info "Mounted under /mnt, /media, /run/media -"
+info "Mounted under /mnt, /media, /run/media (user/removable mounts):"
 { mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)'; true; } | sed 's/^/    /' || true
 
 line
@@ -94,19 +112,13 @@ stop_if_active() {
 }
 if command -v podman &>/dev/null; then
   info "Stopping podman containers…"
-  local pods
-  pods=("${(@f)$(podman ps -q 2>/dev/null)}")
-  if (( ${#pods} )); then
-    podman stop --time 10 "${pods[@]}" || warn "podman stop issues"
-  fi
+  local -a pods; pods=("${(@f)$(podman ps -q 2>/dev/null)}")
+  (( ${#pods} )) && podman stop --time 10 "${pods[@]}" || true
 fi
 if command -v docker &>/dev/null; then
   info "Stopping docker containers…"
-  local dcts
-  dcts=("${(@f)$(docker ps -q 2>/dev/null)}")
-  if (( ${#dcts} )); then
-    docker stop --time 10 "${dcts[@]}" || warn "docker stop issues"
-  fi
+  local -a dcts; dcts=("${(@f)$(docker ps -q 2>/dev/null)}")
+  (( ${#dcts} )) && docker stop --time 10 "${dcts[@]}" || true
 fi
 stop_if_active "libvirtd.service"
 stop_if_active "virtqemud.service"
@@ -117,18 +129,17 @@ if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK}" ]]; then
   ssh-add -D 2>/dev/null || true
 fi
 
-# Networking down (tidy; non-fatal)
+# Networking down (mark so traps can restore on abort)
 if command -v nmcli &>/dev/null; then
   info "Disabling networking (nmcli)…"
+  : > /run/secure-shutdown.netoff
   nmcli radio all off || true
   nmcli networking off || true
 else
   info "Bringing non-loopback interfaces down…"
-  local ifaces
-  ifaces=("${(@f)$(ip -o link show 2>/dev/null | awk -F': ' '/state UP/ && $2!="lo"{print $2}')}") || true
-  for ifc in "${ifaces[@]}"; do
-    ip link set "$ifc" down 2>/dev/null || true
-  done
+  : > /run/secure-shutdown.netoff
+  local -a ifaces; ifaces=("${(@f)$(ip -o link show 2>/dev/null | awk -F': ' '/state UP/ && $2!="lo"{print $2}')}")
+  for ifc in "${ifaces[@]}"; do ip link set "$ifc" down 2>/dev/null || true; done
 fi
 
 # Unmount user/ephemeral mounts (never touches / or /home)
@@ -138,6 +149,7 @@ unmount_tree() {
   targets=("${(@f)$(mount | awk -v b="^$base" '$3 ~ b {print $3}' | sort -r)}")
   if (( ${#targets} )); then
     info "Unmounting under ${base}…"
+    local m
     for m in "${targets[@]}"; do
       umount -R "$m" 2>/dev/null || umount "$m" 2>/dev/null || warn "could not umount $m"
     done
@@ -147,16 +159,17 @@ unmount_tree "/mnt"
 unmount_tree "/media"
 unmount_tree "/run/media"
 
-# Close non-root LUKS maps (skip your root + LVM)
+# Close non-root LUKS maps only (TYPE=crypt), never close 'crypt' (root)
 if command -v cryptsetup &>/dev/null; then
-  local -a maps
-  maps=("${(@f)$(ls /dev/mapper 2>/dev/null | grep -vE '^(control|crypt|arch-vg-.*)$' || true)}")
-  for m in "${maps[@]}"; do
-    if lsblk "/dev/mapper/$m" &>/dev/null; then
-      info "Closing LUKS map: $m"
-      umount -R "/dev/mapper/$m" 2>/dev/null || true
-      cryptsetup close "$m" 2>/dev/null || warn "could not close $m"
-    fi
+  local -a mappers; mappers=("${(@f)$(ls /dev/mapper 2>/dev/null | grep -v '^control$' || true)}")
+  local m t
+  for m in "${mappers[@]}"; do
+    [[ "$m" == "crypt" ]] && continue   # root mapping
+    t="$(lsblk -no TYPE "/dev/mapper/$m" 2>/dev/null || echo "")"
+    [[ "$t" != "crypt" ]] && continue    # skip LVM and others
+    info "Closing LUKS map: $m"
+    umount -R "/dev/mapper/$m" 2>/dev/null || true
+    cryptsetup close "$m" 2>/dev/null || warn "could not close $m"
   done
 fi
 
@@ -167,13 +180,11 @@ if swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
   swapoff -a || warn "swapoff returned non-zero"
 fi
 if command -v zramctl &>/dev/null; then
-  local -a zdevs
-  zdevs=("${(@f)$(zramctl --output NAME --noheadings 2>/dev/null | grep '^/dev/zram' || true)}")
+  local -a zdevs; zdevs=("${(@f)$(zramctl --output NAME --noheadings 2>/dev/null | grep '^/dev/zram' || true)}")
   if (( ${#zdevs} )); then
     info "Resetting zram devices…"
-    # ensure swap is off on those, then reset each
-    local -a zswaps
-    zswaps=("${(@f)$(swapon --show=NAME --noheadings 2>/dev/null | grep '^/dev/zram' || true)}")
+    local -a zswaps; zswaps=("${(@f)$(swapon --show=NAME --noheadings 2>/dev/null | grep '^/dev/zram' || true)}")
+    local d
     for d in "${zswaps[@]}"; do swapoff "$d" 2>/dev/null || true; done
     for d in "${zdevs[@]}";  do zramctl --reset "$d" 2>/dev/null || warn "zram reset incomplete on $d"; done
   fi
@@ -181,11 +192,30 @@ fi
 
 # Writeback + cache drop
 info "Syncing filesystems…"
-(sync; sync; sync) &; spinner "Flushing buffers…" $!
+( sync; sync; sync ) &; spinner "Flushing buffers…" $!
 info "Dropping pagecache/dentries/inodes…"
 echo 3 > /proc/sys/vm/drop_caches || warn "could not drop caches"
 
-# Final state report
-ok "Teardown complete. Extra mounts are clean; stray LUKS closed."
+### ---------- FINAL-STATE SANITY PRINT ----------
+line
+info "Final state check (pre-poweroff):"
+
+info "Remaining TYPE=crypt device-mapper entries:"
+lsblk -rno NAME,TYPE,MOUNTPOINTS /dev/mapper 2>/dev/null | awk '$2=="crypt"{print "    "$0}' || true
+
+info "Active mounts under /mnt, /media, /run/media:"
+mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)' | sed 's/^/    /' || print "    (none)"
+
+info "NetworkManager state (if present):"
+if command -v nmcli &>/dev/null; then
+  nmcli general status 2>/dev/null | sed 's/^/    /' || true
+else
+  print "    nmcli not installed"
+fi
+line
+
+# Final state report & poweroff
+ok "Teardown complete."
+rm -f /run/secure-shutdown.netoff 2>/dev/null || true
 info "Powering off now…"
 exec systemctl poweroff -i
