@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 # Secure shutdown for archcrypt USB (zsh)
 # Flow:
-#   1) Show a nice info panel (fastfetch if available) + relevant system details
+#   1) Show a nice info panel + relevant system details
 #   2) Bottom line: "Goodbye yuriy! ( 'ω' )/  — Press ENTER to power off…"
 #   3) On ENTER: run a safe, clean teardown and poweroff
 
@@ -50,13 +50,6 @@ fi
 clear
 banner
 
-# If fastfetch is present, show it first (quiet on errors)
-if command -v fastfetch &>/dev/null; then
-  # minimal width-aware; no colors forced so it respects your theme
-  fastfetch 2>/dev/null || true
-  line
-fi
-
 # Targeted info that matters for your stack
 info "Kernel: $(uname -r)   Uptime: $(uptime -p)"
 info "TTY: $(tty 2>/dev/null || echo n/a)   User: ${SUDO_USER:-$USER}"
@@ -74,7 +67,7 @@ fi
 info "Block devices:"
 lsblk -o NAME,RM,SIZE,RO,TYPE,MOUNTPOINTS | sed 's/^/    /'
 
-info "Mounted under /mnt, /media, /run/media (likely your exFAT share etc.):"
+info "Mounted under /mnt, /media, /run/media -"
 { mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)'; true; } | sed 's/^/    /' || true
 
 line
@@ -101,11 +94,19 @@ stop_if_active() {
 }
 if command -v podman &>/dev/null; then
   info "Stopping podman containers…"
-  (podman ps -q | xargs -r podman stop --time 10) || warn "podman stop issues"
+  local pods
+  pods=("${(@f)$(podman ps -q 2>/dev/null)}")
+  if (( ${#pods} )); then
+    podman stop --time 10 "${pods[@]}" || warn "podman stop issues"
+  fi
 fi
 if command -v docker &>/dev/null; then
   info "Stopping docker containers…"
-  (docker ps -q | xargs -r docker stop --time 10) || warn "docker stop issues"
+  local dcts
+  dcts=("${(@f)$(docker ps -q 2>/dev/null)}")
+  if (( ${#dcts} )); then
+    docker stop --time 10 "${dcts[@]}" || warn "docker stop issues"
+  fi
 fi
 stop_if_active "libvirtd.service"
 stop_if_active "virtqemud.service"
@@ -123,7 +124,9 @@ if command -v nmcli &>/dev/null; then
   nmcli networking off || true
 else
   info "Bringing non-loopback interfaces down…"
-  ip -o link show 2>/dev/null | awk -F': ' '/state UP/ && $2!="lo"{print $2}' | while read -r ifc; do
+  local ifaces
+  ifaces=("${(@f)$(ip -o link show 2>/dev/null | awk -F': ' '/state UP/ && $2!="lo"{print $2}')}") || true
+  for ifc in "${ifaces[@]}"; do
     ip link set "$ifc" down 2>/dev/null || true
   done
 fi
@@ -132,8 +135,8 @@ fi
 unmount_tree() {
   local base="$1"
   local -a targets
-  mapfile -t targets < <(mount | awk -v b="^$base" '$3 ~ b {print $3}' | sort -r)
-  if (( ${#targets[@]} )); then
+  targets=("${(@f)$(mount | awk -v b="^$base" '$3 ~ b {print $3}' | sort -r)}")
+  if (( ${#targets} )); then
     info "Unmounting under ${base}…"
     for m in "${targets[@]}"; do
       umount -R "$m" 2>/dev/null || umount "$m" 2>/dev/null || warn "could not umount $m"
@@ -146,8 +149,9 @@ unmount_tree "/run/media"
 
 # Close non-root LUKS maps (skip your root + LVM)
 if command -v cryptsetup &>/dev/null; then
-  mapfile -t maps < <(ls /dev/mapper 2>/dev/null | grep -vE '^(control|crypt|arch-vg-.*)$' || true)
-  for m in "${maps[@]:-}"; do
+  local -a maps
+  maps=("${(@f)$(ls /dev/mapper 2>/dev/null | grep -vE '^(control|crypt|arch-vg-.*)$' || true)}")
+  for m in "${maps[@]}"; do
     if lsblk "/dev/mapper/$m" &>/dev/null; then
       info "Closing LUKS map: $m"
       umount -R "/dev/mapper/$m" 2>/dev/null || true
@@ -156,17 +160,22 @@ if command -v cryptsetup &>/dev/null; then
   done
 fi
 
-# zram/swap handling (you said zram only; this covers both)
+# zram/swap handling
 if swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
   info "Disabling swap…"
   swapon --show | sed 's/^/    /' || true
   swapoff -a || warn "swapoff returned non-zero"
 fi
 if command -v zramctl &>/dev/null; then
-  if zramctl --output NAME --noheadings 2>/dev/null | grep -q '^/dev/zram'; then
+  local -a zdevs
+  zdevs=("${(@f)$(zramctl --output NAME --noheadings 2>/dev/null | grep '^/dev/zram' || true)}")
+  if (( ${#zdevs} )); then
     info "Resetting zram devices…"
-    swapon --show=NAME --noheadings 2>/dev/null | grep -E '^/dev/zram' | xargs -r -n1 swapoff || true
-    zramctl --output NAME --noheadings 2>/dev/null | xargs -r -n1 zramctl --reset || warn "zram reset incomplete"
+    # ensure swap is off on those, then reset each
+    local -a zswaps
+    zswaps=("${(@f)$(swapon --show=NAME --noheadings 2>/dev/null | grep '^/dev/zram' || true)}")
+    for d in "${zswaps[@]}"; do swapoff "$d" 2>/dev/null || true; done
+    for d in "${zdevs[@]}";  do zramctl --reset "$d" 2>/dev/null || warn "zram reset incomplete on $d"; done
   fi
 fi
 
