@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# Secure Shutdown for Archcrypt USB (v1.3 - yuriy edition, hardened and fixed)
+# Secure Shutdown for Archcrypt USB (v1.5 - final, hardened)
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -21,7 +21,17 @@ banner() {
   print -P "%F{magenta}=================================================================%f"
 }
 
-spinner() { local msg="$1" pid="$2"; local -a f=('|' '/' '-' '\\'); local i=1; print -n -- " $msg "; while kill -0 "$pid" 2>/dev/null; do print -nr -- "\r $msg ${f[i]}"; (( i = (i % ${#f}) + 1 )); sleep 0.1; done; print -r -- "\r $msg "; }
+spinner() {
+  local msg="$1" pid="$2"
+  local -a f=('|' '/' '-' '\\'); local i=1
+  print -n -- " $msg "
+  while kill -0 "$pid" 2>/dev/null; do
+    print -nr -- "\r $msg ${f[i]}"
+    (( i = (i % ${#f}) + 1 ))
+    sleep 0.1
+  done
+  print -r -- "\r $msg "
+}
 
 _restore_net() {
   [[ -f /run/secure-shutdown.netoff ]] || return 0
@@ -43,7 +53,7 @@ stty -echoctl 2>/dev/null || true
 
 [[ $EUID -ne 0 ]] && exec sudo -E "$0" "$@"
 
-### --------- [1] INFO PANEL ----------
+### --------- INFO PANEL ----------
 clear
 banner
 
@@ -73,35 +83,39 @@ print -P "%F{yellow}                   - press ENTER to begin poweroff -%f"
 line
 read -r
 
-### --------- [2] SECURE TEARDOWN ----------
+### --------- TEARDOWN ----------
 banner
 info "Starting secure shutdown…"
 
 stop_if_active() {
-  systemctl is-active --quiet "$1" && { info "Stopping $1…"; systemctl stop "$1" || warn "Failed to stop $1"; }
+  systemctl is-active --quiet "$1" && {
+    info "Stopping $1…"
+    systemctl stop "$1" || warn "Failed to stop $1"
+  }
 }
 
-# Stop containers (safe for empty)
 if command -v podman &>/dev/null; then
   info "Stopping podman containers…"
   local -a pods
-  pods=("${(@f)$(podman ps -q 2>/dev/null || true)}")
-  (( ${#pods} )) && podman stop --time 10 "${pods[@]}" || true
+  pods=("${(@f)$(podman ps -q 2>/dev/null || echo '')}")
+  (( ${#pods} > 0 )) && podman stop --time 10 "${pods[@]}" || true
 fi
 
 if command -v docker &>/dev/null; then
   info "Stopping docker containers…"
   local -a dcts
-  dcts=("${(@f)$(docker ps -q 2>/dev/null || true)}")
-  (( ${#dcts} )) && docker stop --time 10 "${dcts[@]}" || true
+  dcts=("${(@f)$(docker ps -q 2>/dev/null || echo '')}")
+  (( ${#dcts} > 0 )) && docker stop --time 10 "${dcts[@]}" || true
 fi
 
 stop_if_active "libvirtd.service"
 stop_if_active "virtqemud.service"
 
-[[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK}" ]] && { info "Clearing ssh-agent keys…"; ssh-add -D 2>/dev/null || true; }
+[[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK}" ]] && {
+  info "Clearing ssh-agent keys…"
+  ssh-add -D 2>/dev/null || true
+}
 
-# Networking teardown
 if command -v nmcli &>/dev/null; then
   info "Disabling networking (nmcli)…"
   : > /run/secure-shutdown.netoff
@@ -115,7 +129,6 @@ else
   done
 fi
 
-# Unmount /mnt /media /run/media /mnt/usb
 unmount_tree() {
   local base="$1"
   local -a targets
@@ -131,7 +144,6 @@ unmount_tree "/media"
 unmount_tree "/run/media"
 unmount_tree "/mnt/usb"
 
-# Close all LUKS except root
 if command -v cryptsetup &>/dev/null; then
   for m in ${(f)"$(ls /dev/mapper 2>/dev/null | grep -v '^control$')"}; do
     [[ "$m" == "crypt" ]] && continue
@@ -142,7 +154,6 @@ if command -v cryptsetup &>/dev/null; then
   done
 fi
 
-# ZRAM and swap
 if swapon --noheadings --show=NAME 2>/dev/null | grep -q .; then
   info "Disabling swap…"
   swapon --show | sed 's/^/    /'
@@ -161,7 +172,7 @@ info "Syncing filesystems…"
 info "Dropping pagecache/dentries/inodes…"
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || warn "could not drop caches"
 
-### --------- [3] FINAL CHECK + SECOND PROMPT ----------
+### --------- FINAL CONFIRMATION ----------
 line
 info "Final state check (pre-poweroff):"
 info "Remaining TYPE=crypt entries:"
