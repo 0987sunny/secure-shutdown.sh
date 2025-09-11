@@ -1,4 +1,5 @@
 #!/usr/bin/env zsh
+# v 1.0 yuriy edition 
 # Secure shutdown for archcrypt USB (zsh)
 # Flow:
 #   1) Show a nice info panel + relevant system details
@@ -31,13 +32,13 @@ spinner() {  # spinner "message" & pid
   print -r -- "\r $msg "
 }
 
-line() { print -P "%F{magenta}-----------------------------------------------------%f"; }
+line() { print -P "%F{magenta}-------------------------------------------------------------------%f"; }
 banner() {
   local h="$(hostname -s 2>/dev/null || echo archcrypt)"
   local d="$(date '+%Y-%m-%d %H:%M:%S %Z')"
-  print -P "%F{magenta}=====================================================%f"
-  print -P "%F{magenta} Secure Shutdown — ${h} — ${d}%f"
-  print -P "%F{magenta}=====================================================%f"
+  print -P "%F{magenta}=================================================================%f"
+  print -P "%F{yellow}      Secure Shutdown — ${h} — ${d}%F      "
+  print -P "%F{magenta}=================================================================%f"
 }
 
 ### ---------- safety nets (restore net on abort) ----------
@@ -69,6 +70,7 @@ fi
 clear
 banner
 
+print -P "%F{green}[i] archcrypt System Details -%f"
 info "Kernel: $(uname -r)   Uptime: $(uptime -p)"
 info "TTY: $(tty 2>/dev/null || echo n/a)   User: ${SUDO_USER:-$USER}"
 info "Root source: $(findmnt -no SOURCE /)"
@@ -84,16 +86,17 @@ fi
 
 info "Block devices:"
 lsblk -o NAME,RM,SIZE,RO,TYPE,MOUNTPOINTS | sed 's/^/    /'
+print
 
-info "Mounted under /mnt, /media, /run/media (user/removable mounts):"
+info "Mounted under /mnt /media /run/media (user/removable mounts) -"
 { mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)'; true; } | sed 's/^/    /' || true
 
+print
+print -P "%F{green}[✓] Ready to initialize secure power off sequence...%f"
+print -P "%F{green}[→] Goodbye yuriy.  ( 'ω' )/%f"
 line
-print
-print -P "%F{green}[✓]%f Ready."
-print
-print -P "%F{cyan}[→]%f Goodbye yuriy! ( 'ω' )/  — %F{magenta}Press ENTER to power off…%f"
-print
+print -P "%F{yellow}                   - press ENTER to power off -%f              "
+line
 
 # Wait for ENTER only (ignore other keys)
 read -r
