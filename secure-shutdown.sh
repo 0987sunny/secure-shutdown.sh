@@ -1,15 +1,9 @@
 #!/usr/bin/env zsh
-# v 1.0 yuriy edition 
-# Secure shutdown for archcrypt USB (zsh)
-# Flow:
-#   1) Show a nice info panel + relevant system details
-#   2) Bottom line: "Goodbye yuriy! ( 'ω' )/  — Press ENTER to power off…"
-#   3) On ENTER: run a safe, clean teardown and poweroff
+# Secure Shutdown for Archcrypt USB (v1.1 - yuriy edition, enhanced)
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-### ---------- UI helpers ----------
 autoload -Uz colors && colors || true
 : ${TERM:="xterm-256color"}
 
@@ -17,20 +11,6 @@ ok()    { print -P "%F{green}[✓]%f $*"; }
 warn()  { print -P "%F{yellow}[!]%f $*"; }
 err()   { print -P "%F{red}[✗]%f $*" >&2; }
 info()  { print -P "%F{cyan}[*]%f $*"; }
-
-# zsh-native spinner
-spinner() {  # spinner "message" & pid
-  local msg="$1" pid="$2"
-  local -a frames=('|' '/' '-' '\')
-  local i=1 n=${#frames}
-  print -n -- " $msg "
-  while kill -0 "$pid" 2>/dev/null; do
-    print -nr -- "\r $msg ${frames[i]}"
-    (( i = (i % n) + 1 ))
-    sleep 0.1
-  done
-  print -r -- "\r $msg "
-}
 
 line() { print -P "%F{magenta}-------------------------------------------------------------------%f"; }
 banner() {
@@ -41,7 +21,8 @@ banner() {
   print -P "%F{magenta}=================================================================%f"
 }
 
-### ---------- safety nets (restore net on abort) ----------
+spinner() { local msg="$1" pid="$2"; local -a f=('|' '/' '-' '\\'); local i=1; print -n -- " $msg "; while kill -0 "$pid" 2>/dev/null; do print -nr -- "\r $msg ${f[i]}"; (( i = (i % ${#f}) + 1 )); sleep 0.1; done; print -r -- "\r $msg "; }
+
 _restore_net() {
   [[ -f /run/secure-shutdown.netoff ]] || return 0
   if command -v nmcli &>/dev/null; then
@@ -49,7 +30,6 @@ _restore_net() {
     nmcli networking on || true
     systemctl restart NetworkManager || true
   else
-    local ifc
     for ifc in ${(f)"$(ip -o link show 2>/dev/null | awk -F': ' '$2!="lo"{print $2}')"}; do
       ip link set "$ifc" up 2>/dev/null || true
     done
@@ -59,14 +39,11 @@ _restore_net() {
 
 trap 'err "Unexpected error; restoring networking and aborting."; _restore_net; exit 1' ERR
 trap 'warn "Interrupted by user; restoring networking."; _restore_net; exit 130' INT
-stty -echoctl 2>/dev/null || true  # hide ^C caret
+stty -echoctl 2>/dev/null || true
 
-# Require root; re-exec with same env. Will prompt for sudo if needed.
-if [[ $EUID -ne 0 ]]; then
-  exec sudo -E "$0" "$@"
-fi
+[[ $EUID -ne 0 ]] && exec sudo -E "$0" "$@"
 
-### ---------- 1) INFO PANEL ----------
+### --------- [1] INFO PANEL ----------
 clear
 banner
 
@@ -75,64 +52,47 @@ info "Kernel: $(uname -r)   Uptime: $(uptime -p)"
 info "TTY: $(tty 2>/dev/null || echo n/a)   User: ${SUDO_USER:-$USER}"
 info "Root source: $(findmnt -no SOURCE /)"
 
-if command -v cryptsetup >/dev/null 2>&1; then
-  if cryptsetup status crypt &>/dev/null; then
-    info "LUKS mapping 'crypt' is active:"
-    cryptsetup status crypt | sed 's/^/    /'
-  else
-    warn "LUKS mapping 'crypt' not detected"
-  fi
+if command -v cryptsetup >/dev/null && cryptsetup status crypt &>/dev/null; then
+  info "LUKS mapping 'crypt' is active:"
+  cryptsetup status crypt | sed 's/^/    /'
+else
+  warn "LUKS mapping 'crypt' not detected"
 fi
 
 info "Block devices:"
 lsblk -o NAME,RM,SIZE,RO,TYPE,MOUNTPOINTS | sed 's/^/    /'
-print
 
-info "Mounted under /mnt /media /run/media (user/removable mounts) -"
-{ mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)'; true; } | sed 's/^/    /' || true
+info "Mounted under /mnt /media /run/media:"
+{ mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)'; true; } | sed 's/^/    /'
 
 print
 print -P "%F{green}[✓] Ready to initialize secure power off sequence...%f"
 print -P "%F{green}[→] Goodbye yuriy.  ( 'ω' )/%f"
 line
-print -P "%F{yellow}                   - press ENTER to power off -%f              "
+print -P "%F{yellow}                   - press ENTER to begin poweroff -%f"
 line
-
-# Wait for ENTER only (ignore other keys)
 read -r
 
-### ---------- 2) SECURE SHUTDOWN SEQUENCE ----------
+### --------- [2] SECURE TEARDOWN ----------
 banner
 info "Starting secure shutdown…"
 
-# Gracefully stop containers/VM daemons (best-effort)
 stop_if_active() {
-  local unit="$1"
-  if systemctl is-active --quiet "$unit"; then
-    info "Stopping $unit…"
-    systemctl stop "$unit" || warn "Failed to stop $unit"
-  fi
+  systemctl is-active --quiet "$1" && { info "Stopping $1…"; systemctl stop "$1" || warn "Failed to stop $1"; }
 }
 if command -v podman &>/dev/null; then
   info "Stopping podman containers…"
-  local -a pods; pods=("${(@f)$(podman ps -q 2>/dev/null)}")
-  (( ${#pods} )) && podman stop --time 10 "${pods[@]}" || true
+  podman ps -q | xargs -r podman stop --time 10 || true
 fi
 if command -v docker &>/dev/null; then
   info "Stopping docker containers…"
-  local -a dcts; dcts=("${(@f)$(docker ps -q 2>/dev/null)}")
-  (( ${#dcts} )) && docker stop --time 10 "${dcts[@]}" || true
+  docker ps -q | xargs -r docker stop --time 10 || true
 fi
 stop_if_active "libvirtd.service"
 stop_if_active "virtqemud.service"
 
-# SSH agent cleanup (no lingering keys)
-if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK}" ]]; then
-  info "Clearing ssh-agent keys…"
-  ssh-add -D 2>/dev/null || true
-fi
+[[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK}" ]] && { info "Clearing ssh-agent keys…"; ssh-add -D 2>/dev/null || true; }
 
-# Networking down (mark so traps can restore on abort)
 if command -v nmcli &>/dev/null; then
   info "Disabling networking (nmcli)…"
   : > /run/secure-shutdown.netoff
@@ -141,84 +101,81 @@ if command -v nmcli &>/dev/null; then
 else
   info "Bringing non-loopback interfaces down…"
   : > /run/secure-shutdown.netoff
-  local -a ifaces; ifaces=("${(@f)$(ip -o link show 2>/dev/null | awk -F': ' '/state UP/ && $2!="lo"{print $2}')}")
-  for ifc in "${ifaces[@]}"; do ip link set "$ifc" down 2>/dev/null || true; done
+  for ifc in ${(f)"$(ip -o link show 2>/dev/null | awk -F': ' '/state UP/ && $2!="lo"{print $2}')"}; do
+    ip link set "$ifc" down 2>/dev/null || true
+  done
 fi
 
-# Unmount user/ephemeral mounts (never touches / or /home)
+# Unmount targets including /mnt/usb
 unmount_tree() {
   local base="$1"
   local -a targets
   targets=("${(@f)$(mount | awk -v b="^$base" '$3 ~ b {print $3}' | sort -r)}")
-  if (( ${#targets} )); then
-    info "Unmounting under ${base}…"
-    local m
-    for m in "${targets[@]}"; do
-      umount -R "$m" 2>/dev/null || umount "$m" 2>/dev/null || warn "could not umount $m"
-    done
-  fi
+  (( ${#targets} )) || return
+  info "Unmounting under ${base}…"
+  for m in "${targets[@]}"; do
+    umount -R "$m" 2>/dev/null || umount "$m" 2>/dev/null || warn "could not umount $m"
+  done
 }
 unmount_tree "/mnt"
 unmount_tree "/media"
 unmount_tree "/run/media"
+unmount_tree "/mnt/usb"  # Safe since it's on same device but separate from root LUKS
 
-# Close non-root LUKS maps only (TYPE=crypt), never close 'crypt' (root)
+# Close non-root LUKS maps (skip root 'crypt')
 if command -v cryptsetup &>/dev/null; then
-  local -a mappers; mappers=("${(@f)$(ls /dev/mapper 2>/dev/null | grep -v '^control$' || true)}")
-  local m t
-  for m in "${mappers[@]}"; do
-    [[ "$m" == "crypt" ]] && continue   # root mapping
-    t="$(lsblk -no TYPE "/dev/mapper/$m" 2>/dev/null || echo "")"
-    [[ "$t" != "crypt" ]] && continue    # skip LVM and others
+  for m in ${(f)"$(ls /dev/mapper 2>/dev/null | grep -v '^control$')"}; do
+    [[ "$m" == "crypt" ]] && continue
+    [[ "$(lsblk -no TYPE "/dev/mapper/$m" 2>/dev/null)" == "crypt" ]] || continue
     info "Closing LUKS map: $m"
     umount -R "/dev/mapper/$m" 2>/dev/null || true
     cryptsetup close "$m" 2>/dev/null || warn "could not close $m"
   done
 fi
 
-# zram/swap handling
-if swapon --show=NAME --noheadings 2>/dev/null | grep -q .; then
+# zram/swap teardown
+if swapon --noheadings --show=NAME 2>/dev/null | grep -q .; then
   info "Disabling swap…"
-  swapon --show | sed 's/^/    /' || true
+  swapon --show | sed 's/^/    /'
   swapoff -a || warn "swapoff returned non-zero"
 fi
 if command -v zramctl &>/dev/null; then
-  local -a zdevs; zdevs=("${(@f)$(zramctl --output NAME --noheadings 2>/dev/null | grep '^/dev/zram' || true)}")
-  if (( ${#zdevs} )); then
-    info "Resetting zram devices…"
-    local -a zswaps; zswaps=("${(@f)$(swapon --show=NAME --noheadings 2>/dev/null | grep '^/dev/zram' || true)}")
-    local d
-    for d in "${zswaps[@]}"; do swapoff "$d" 2>/dev/null || true; done
-    for d in "${zdevs[@]}";  do zramctl --reset "$d" 2>/dev/null || warn "zram reset incomplete on $d"; done
-  fi
+  for d in ${(f)"$(zramctl --output NAME --noheadings | grep '^/dev/zram')"}; do
+    swapoff "$d" 2>/dev/null || true
+    zramctl --reset "$d" 2>/dev/null || warn "zram reset failed on $d"
+  done
 fi
 
-# Writeback + cache drop
 info "Syncing filesystems…"
-( sync; sync; sync ) &; spinner "Flushing buffers…" $!
-info "Dropping pagecache/dentries/inodes…"
-echo 3 > /proc/sys/vm/drop_caches || warn "could not drop caches"
+( sync; sync; sync ) &> /dev/null & spinner "Flushing buffers…" $!
 
-### ---------- FINAL-STATE SANITY PRINT ----------
+info "Dropping pagecache/dentries/inodes…"
+echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || warn "could not drop caches"
+
+### --------- [3] FINAL CHECK ----------
 line
 info "Final state check (pre-poweroff):"
 
-info "Remaining TYPE=crypt device-mapper entries:"
+info "Remaining TYPE=crypt entries:"
 lsblk -rno NAME,TYPE,MOUNTPOINTS /dev/mapper 2>/dev/null | awk '$2=="crypt"{print "    "$0}' || true
 
 info "Active mounts under /mnt, /media, /run/media:"
 mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)' | sed 's/^/    /' || print "    (none)"
 
 info "NetworkManager state (if present):"
-if command -v nmcli &>/dev/null; then
-  nmcli general status 2>/dev/null | sed 's/^/    /' || true
-else
-  print "    nmcli not installed"
-fi
+command -v nmcli &>/dev/null && nmcli general status 2>/dev/null | sed 's/^/    /' || print "    nmcli not installed"
 line
 
-# Final state report & poweroff
 ok "Teardown complete."
 rm -f /run/secure-shutdown.netoff 2>/dev/null || true
+
+# === NEW FINAL PROMPT BEFORE POWER OFF ===
+print -P "%F{green}[✓] System ready for shutdown.%f"
+print -P "%F{green}[→] Goodbye yuriy.  ( 'ω' )/%f"
+line
+print -P "%F{yellow}                   - press ENTER to power off -%f"
+line
+read -r
+
 info "Powering off now…"
-exec systemctl poweroff -i
+exec systemctl poweroff -i > /dev/null 2>&1
