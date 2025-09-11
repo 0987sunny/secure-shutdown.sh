@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# Secure Shutdown for Archcrypt USB (v1.1 - yuriy edition, enhanced)
+# Secure Shutdown for Archcrypt USB (v1.3 - yuriy edition, hardened and fixed)
 
 set -Eeuo pipefail
 IFS=$'\n\t'
@@ -80,19 +80,28 @@ info "Starting secure shutdown…"
 stop_if_active() {
   systemctl is-active --quiet "$1" && { info "Stopping $1…"; systemctl stop "$1" || warn "Failed to stop $1"; }
 }
+
+# Stop containers (safe for empty)
 if command -v podman &>/dev/null; then
   info "Stopping podman containers…"
-  podman ps -q | xargs -r podman stop --time 10 || true
+  local -a pods
+  pods=("${(@f)$(podman ps -q 2>/dev/null || true)}")
+  (( ${#pods} )) && podman stop --time 10 "${pods[@]}" || true
 fi
+
 if command -v docker &>/dev/null; then
   info "Stopping docker containers…"
-  docker ps -q | xargs -r docker stop --time 10 || true
+  local -a dcts
+  dcts=("${(@f)$(docker ps -q 2>/dev/null || true)}")
+  (( ${#dcts} )) && docker stop --time 10 "${dcts[@]}" || true
 fi
+
 stop_if_active "libvirtd.service"
 stop_if_active "virtqemud.service"
 
 [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK}" ]] && { info "Clearing ssh-agent keys…"; ssh-add -D 2>/dev/null || true; }
 
+# Networking teardown
 if command -v nmcli &>/dev/null; then
   info "Disabling networking (nmcli)…"
   : > /run/secure-shutdown.netoff
@@ -106,7 +115,7 @@ else
   done
 fi
 
-# Unmount targets including /mnt/usb
+# Unmount /mnt /media /run/media /mnt/usb
 unmount_tree() {
   local base="$1"
   local -a targets
@@ -120,9 +129,9 @@ unmount_tree() {
 unmount_tree "/mnt"
 unmount_tree "/media"
 unmount_tree "/run/media"
-unmount_tree "/mnt/usb"  # Safe since it's on same device but separate from root LUKS
+unmount_tree "/mnt/usb"
 
-# Close non-root LUKS maps (skip root 'crypt')
+# Close all LUKS except root
 if command -v cryptsetup &>/dev/null; then
   for m in ${(f)"$(ls /dev/mapper 2>/dev/null | grep -v '^control$')"}; do
     [[ "$m" == "crypt" ]] && continue
@@ -133,7 +142,7 @@ if command -v cryptsetup &>/dev/null; then
   done
 fi
 
-# zram/swap teardown
+# ZRAM and swap
 if swapon --noheadings --show=NAME 2>/dev/null | grep -q .; then
   info "Disabling swap…"
   swapon --show | sed 's/^/    /'
@@ -152,26 +161,23 @@ info "Syncing filesystems…"
 info "Dropping pagecache/dentries/inodes…"
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || warn "could not drop caches"
 
-### --------- [3] FINAL CHECK ----------
+### --------- [3] FINAL CHECK + SECOND PROMPT ----------
 line
 info "Final state check (pre-poweroff):"
-
 info "Remaining TYPE=crypt entries:"
 lsblk -rno NAME,TYPE,MOUNTPOINTS /dev/mapper 2>/dev/null | awk '$2=="crypt"{print "    "$0}' || true
 
 info "Active mounts under /mnt, /media, /run/media:"
 mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)' | sed 's/^/    /' || print "    (none)"
 
-info "NetworkManager state (if present):"
+info "NetworkManager state:"
 command -v nmcli &>/dev/null && nmcli general status 2>/dev/null | sed 's/^/    /' || print "    nmcli not installed"
 line
 
 ok "Teardown complete."
 rm -f /run/secure-shutdown.netoff 2>/dev/null || true
 
-# === NEW FINAL PROMPT BEFORE POWER OFF ===
 print -P "%F{green}[✓] System ready for shutdown.%f"
-print -P "%F{green}[→] Goodbye yuriy.  ( 'ω' )/%f"
 line
 print -P "%F{yellow}                   - press ENTER to power off -%f"
 line
