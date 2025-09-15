@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# v 1.1 yuriy edition 
+# v 1.2 yuriy edition 
 # Secure shutdown for archcrypt USB (zsh)
 # Flow:
 #   1) Show a nice info panel + relevant system details
@@ -19,13 +19,13 @@ warn()  { print -P "%F{yellow}[!]%f $*"; }
 err()   { print -P "%F{red}[✗]%f $*" >&2; }
 info()  { print -P "%F{cyan}[*]%f $*"; }
 
-line() { print -P "%F{magenta}-------------------------------------------------------------------%f"; }
+line() { print -P "%F{magenta}------------------------------------------------------------------------%f"; }
 banner() {
   local h="$(hostname -s 2>/dev/null || echo archcrypt)"
   local d="$(date '+%Y-%m-%d %H:%M:%S %Z')"
-  print -P "%F{magenta}=================================================================%f"
-  print -P "%F{yellow}      Secure Shutdown — ${h} — ${d}%F      "
-  print -P "%F{magenta}=================================================================%f"
+  print -P "%F{magenta}=======================================================================%f"
+  print -P "%F{yellow}         Secure Shutdown — ${h} — ${d}%F      "
+  print -P "%F{magenta}=======================================================================%f"
 }
 
 ### ---------- safety nets (restore net on abort) ----------
@@ -82,7 +82,7 @@ print
 print -P "%F{green}[✓] Ready to initialize secure power off sequence...%f"
 print -P "%F{green}[→] Goodbye yuriy.  ( 'ω' )/%f"
 line
-print -P "%F{yellow}                - press ENTER to begin power off -%f              "
+print -P "%F{yellow}                   - press ENTER to begin power off -%f              "
 line
 
 # Wait for first ENTER to begin teardown
@@ -192,7 +192,6 @@ info "Dropping pagecache/dentries/inodes…"
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || warn "could not drop caches"
 
 ### ---------- FINAL-STATE SANITY PRINT ----------
-line
 info "Final state check (pre-poweroff):"
 
 info "Remaining TYPE=crypt device-mapper entries:"
@@ -202,18 +201,19 @@ info "Active mounts under /mnt, /media, /run/media:"
 mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)' | sed 's/^/    /' || print "    (none)"
 
 info "NetworkManager state (if present):"
+line
 if command -v nmcli &>/dev/null; then
   nmcli general status 2>/dev/null | sed 's/^/    /' || true
 else
   print "    nmcli not installed"
 fi
-line
 
 ok "Teardown complete."
 rm -f /run/secure-shutdown.netoff 2>/dev/null || true
 print -P "%F{green}[→] Goodbye yuriy.  ( 'ω' )/%f"
 print
-print -P "%F{yellow}                  - press ENTER to power off -%f              "
+line
+print -P "%F{yellow}                     - press ENTER to power off -%f              "
 line
 
 # Wait for second ENTER to power off
