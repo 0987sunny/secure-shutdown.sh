@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# v 1.2 yuriy edition 
+# v 1.3 yuriy edition 
 # Secure shutdown for archcrypt USB (zsh)
 # Flow:
 #   1) Show a nice info panel + relevant system details
@@ -75,8 +75,9 @@ info "Block devices:"
 lsblk -o NAME,RM,SIZE,RO,TYPE,MOUNTPOINTS | sed 's/^/    /'
 print
 
-info "Mounted under /mnt /media /run/media (user/removable mounts) -"
-{ mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)'; true; } | sed 's/^/    /' || true
+info "Mounted user/removable partitions:"
+mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)' | \
+  awk '{printf "    %-20s %-20s %s\n", $1, $3, $5}' || print "    (none)"
 
 print
 print -P "%F{green}[✓] Ready to initialize secure power off sequence...%f"
@@ -198,7 +199,8 @@ info "Remaining TYPE=crypt device-mapper entries:"
 lsblk -rno NAME,TYPE,MOUNTPOINTS /dev/mapper 2>/dev/null | awk '$2=="crypt"{print "    "$0}' || true
 
 info "Active mounts under /mnt, /media, /run/media:"
-mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)' | sed 's/^/    /' || print "    (none)"
+mount | grep -E ' on (/(mnt|media)(/| )|/run/media/)' | \
+  awk '{printf "    %-20s %-20s %s\n", $1, $3, $5}' || print "    (none)"
 
 info "NetworkManager state (if present):"
 line
