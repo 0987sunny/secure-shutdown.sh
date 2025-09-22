@@ -1,9 +1,9 @@
 #!/usr/bin/env zsh
 # v 1.3 yuriy edition 
 # Secure shutdown for archcrypt USB (zsh)
-# Flow:
+# Flow: 
 #   1) Show a nice info panel + relevant system details
-#   2) Bottom line: "Goodbye yuriy! ( 'ω' )/  — Press ENTER to begin power off…"
+#   2) Bottom line: "Goodbye yuriy! ヽ( ⌒ω⌒)ﾉ  — Press ENTER to begin power off…"
 #   3) On first ENTER: run a safe, clean teardown
 #   4) On second ENTER: poweroff
 
@@ -212,7 +212,7 @@ fi
 
 ok "Teardown complete."
 rm -f /run/secure-shutdown.netoff 2>/dev/null || true
-print -P "%F{green}[→] Goodbye yuriy.  ( 'ω' )/%f"
+print -P "%F{green}[→] Goodbye yuriy.  ヽ( ⌒ω⌒)ﾉ%f"
 print
 line
 print -P "%F{yellow}                     - press ENTER to power off -%f              "
